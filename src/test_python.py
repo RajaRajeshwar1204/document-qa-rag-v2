@@ -1,0 +1,1 @@
+print("Hello! My Document Q&A RAG project is working")
