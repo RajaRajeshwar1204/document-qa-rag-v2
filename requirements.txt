@@ -6,3 +6,4 @@ chromadb
 streamlit
 ollama
 torchvision
+rank-bm25

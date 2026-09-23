@@ -2,7 +2,7 @@ from typing import TypedDict
 
 from langgraph.graph import StateGraph, END
 
-from src.rag import model, collection
+from src.retriever import hybrid_retrieve
 from src.config import TOP_K, OLLAMA_MODEL
 from src.router import route_question
 
@@ -21,6 +21,7 @@ class RAGState(TypedDict):
     verification_attempts: int
     route: str
 
+
 def route(state: RAGState):
     decision = route_question(state["question"])
 
@@ -28,30 +29,33 @@ def route(state: RAGState):
         "route": decision
     }
 
-def retrieve(state: RAGState):
-    question_embedding = model.encode([state["question"]])
 
-    results = collection.query(
-        query_embeddings=question_embedding.tolist(),
-        n_results=TOP_K
+def retrieve(state: RAGState):
+    results = hybrid_retrieve(
+        state["question"],
+        top_k=TOP_K
     )
 
     return {
-        "context": results["documents"][0],
-        "sources": [
-            metadata["source"]
-            for metadata in results["metadatas"][0]
+        "context": [
+            result["chunk"]
+            for result in results
         ],
-        "distances": results["distances"][0]
+        "sources": [
+            result["source"]["source"]
+            for result in results
+        ],
+        "distances": [
+            result["score"]
+            for result in results
+        ]
     }
-def check_retrieval(state: RAGState):
-    if not state["distances"]:
-        return {
-            "retrieval_status": "NOT_RELEVANT"
-        }
 
-    if all(distance > 1.0 for distance in state["distances"]):
+
+def check_retrieval(state: RAGState):
+    if not state["context"]:
         print("Retrieval: NOT_RELEVANT")
+
         return {
             "retrieval_status": "NOT_RELEVANT"
         }
@@ -62,14 +66,20 @@ def check_retrieval(state: RAGState):
         "retrieval_status": "RELEVANT"
     }
 
+
 def generate_answer(state: RAGState):
     context = "\n\n".join(state["context"])
 
     prompt = f"""
 Answer the question using only the provided context.
 
-If the answer cannot be found in the context, say:
+If the context contains the answer, answer the question directly.
+If the question asks for multiple items, include all relevant items
+that are explicitly stated in the context.
+
+Only say:
 "I don't know based on the provided documents."
+when the requested information is genuinely absent from the context.
 
 Context:
 {context}
@@ -87,7 +97,10 @@ Answer:
                 "role": "user",
                 "content": prompt
             }
-        ]
+        ],
+        options={
+            "temperature": 0
+        }
     )
 
     return {
@@ -135,12 +148,15 @@ Verdict:
                 "role": "user",
                 "content": prompt
             }
-        ]
+        ],
+        options={
+            "temperature": 0
+        }
     )
 
     verdict_text = response.message.content.strip().upper()
 
-    if "NOT_SUPPORTED" == verdict_text:
+    if verdict_text == "NOT_SUPPORTED":
         verdict = "NOT_SUPPORTED"
     else:
         verdict = "SUPPORTED"
@@ -171,6 +187,14 @@ Answer the question again using only the provided context.
 
 Be precise and do not add information that is not present in the context.
 
+If the context contains the answer, answer the question directly.
+If the question asks for multiple items, include all relevant items
+that are explicitly stated in the context.
+
+Only say:
+"I don't know based on the provided documents."
+when the requested information is genuinely absent from the context.
+
 Context:
 {context}
 
@@ -190,7 +214,10 @@ Answer:
                 "role": "user",
                 "content": prompt
             }
-        ]
+        ],
+        options={
+            "temperature": 0
+        }
     )
 
     return {
@@ -201,44 +228,20 @@ Answer:
     }
 
 
-def route(state: RAGState):
-    decision = route_question(state["question"])
-
-    return {
-        "route": decision
-    }
-
 def handle_other(state: RAGState):
-    response = chat(
-        model=OLLAMA_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": f"""
-You are a friendly assistant.
-
-The user's question is not related to the documents.
-
-Respond briefly and naturally.
-
-Question:
-{state["question"]}
-"""
-            }
-        ]
-    )
-
     return {
-        "answer": response.message.content,
+        "answer": "I don't know based on the provided documents.",
         "verification": "NOT_APPLICABLE",
         "sources": []
     }
+
 
 def handle_irrelevant_retrieval(state: RAGState):
     return {
         "answer": "I don't know based on the provided documents.",
         "verification": "NOT_APPLICABLE"
     }
+
 
 def build_graph():
     graph = StateGraph(RAGState)
